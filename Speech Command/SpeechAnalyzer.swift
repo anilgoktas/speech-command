@@ -18,14 +18,15 @@ protocol SpeechAnalyzing: AnyObject {
 }
 
 /// - Note: [Reference](https://heartbeat.fritz.ai/speech-recognition-and-speech-synthesis-on-ios-with-swift-d1a63e469cd9)
-final class SpeechAnalyzer: SpeechAnalyzing {
+final class SpeechAnalyzer: NSObject, SpeechAnalyzing {
     
     // MARK: - Properties
     
     var latestWord: String? { didSet { onWordUpdate?(latestWord) } }
     var onWordUpdate: ((String?) -> Void)?
     
-    private let audioEngine = AVAudioEngine()
+    private let captureSession = AVCaptureSession()
+    
     private let recognizer: SFSpeechRecognizer = {
         let recognizer = SFSpeechRecognizer(locale: Current.locale)!
         recognizer.defaultTaskHint = .dictation
@@ -45,6 +46,12 @@ final class SpeechAnalyzer: SpeechAnalyzing {
     
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var currentTask: SFSpeechRecognitionTask?
+    
+    // MARK: - Life Cycle
+    
+    deinit {
+        stop()
+    }
     
     // MARK: - Analyzing
     
@@ -71,70 +78,120 @@ final class SpeechAnalyzer: SpeechAnalyzing {
     }
     
     func start() {
+        // Cancel previous task.
+        currentTask?.cancel()
+        currentTask = nil
+        
+        // Configure a request.
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.taskHint = .dictation
         request.requiresOnDeviceRecognition = true
         request.shouldReportPartialResults = true
         self.request = request
-
-        let node = audioEngine.inputNode
-        let recordingFormat = node.outputFormat(forBus: 0)
-        node.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { [weak self] buffer, _ in
-            self?.request?.append(buffer)
-        }
-
-        do {
-            audioEngine.prepare()
-            try audioEngine.start()
-        } catch {
-            fatalError(error.localizedDescription)
+        
+        // Configure new task.
+        currentTask = recognizer.recognitionTask(with: request, delegate: self)
+        
+        guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
+            fatalError("Could not get capture device.")
         }
         
-        // Indicates not available on `macOS`.
-//        if !recognizer.isAvailable {
-//            fatalError("SFSpeechRecognizer is not available")
-//        }
-        
-        currentTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
-            guard let result = result else {
-                print("There was an error: " + String(describing: error))
-                DispatchQueue.main.async {
-                    self?.latestWord = nil
-                }
-                return
-            }
-            
-            // Lowercase the formatted string in order to match.
-            let formattedString = result.bestTranscription.formattedString
-            let lowercased = formattedString.lowercased(with: Current.locale)
-
-            if let number = self?.stringNumberFormatter.number(from: lowercased) {
-                let numberStringValue = number.stringValue
-                DispatchQueue.main.async {
-                    self?.latestWord = numberStringValue
-                    
-                    // Restart for faster processing.
-                    self?.stop()
-                    self?.start()
-                }
-            } else {
-                DispatchQueue.main.async {
-                    self?.stop()
-                    self?.start()
-                }
-            }
+        guard let audioInput = try? AVCaptureDeviceInput(device: audioDevice) else {
+            fatalError("Could not create input device.")
         }
+        
+        guard captureSession.canAddInput(audioInput) else {
+            fatalError("Could not add input device")
+        }
+        captureSession.addInput(audioInput)
+        
+        let audioOutput = AVCaptureAudioDataOutput()
+        let queue = DispatchQueue(label: "speech-analyzer", qos: .utility)
+        audioOutput.setSampleBufferDelegate(self, queue: queue)
+        
+        guard captureSession.canAddOutput(audioOutput) else {
+            fatalError("Could not add audio output")
+        }
+        
+        captureSession.addOutput(audioOutput)
+//        audioOutput.connection(with: .audio)
+        captureSession.startRunning()
     }
     
     func stop() {
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
+        captureSession.stopRunning()
         
         request?.endAudio()
         request = nil
         
         currentTask?.cancel()
         currentTask = nil
+    }
+    
+}
+
+extension SpeechAnalyzer: AVCaptureAudioDataOutputSampleBufferDelegate {
+    
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        request?.appendAudioSampleBuffer(sampleBuffer)
+    }
+    
+}
+
+extension SpeechAnalyzer: SFSpeechRecognitionTaskDelegate {
+    
+    func speechRecognitionDidDetectSpeech(_ task: SFSpeechRecognitionTask) {
+        print("--> speechRecognitionDidDetectSpeech")
+    }
+    
+    func speechRecognitionTask(
+        _ task: SFSpeechRecognitionTask,
+        didHypothesizeTranscription transcription: SFTranscription
+    ) {
+        print("--> didHypothesizeTranscription")
+        print(transcription)
+        
+        guard let lastSegment = transcription.segments.last else {
+            DispatchQueue.main.async {
+                self.latestWord = nil
+            }
+            return
+        }
+        
+        let lowercased = lastSegment.substring.lowercased(with: Current.locale)
+        
+        if let number = stringNumberFormatter.number(from: lowercased) {
+            let numberStringValue = number.stringValue
+            DispatchQueue.main.async {
+                self.latestWord = numberStringValue
+            }
+        } else {
+            DispatchQueue.main.async {
+                self.latestWord = lowercased
+            }
+        }
+    }
+    
+    func speechRecognitionTask(_ task: SFSpeechRecognitionTask, didFinishRecognition recognitionResult: SFSpeechRecognitionResult) {
+        print("--> didFinishRecognition")
+    }
+    
+    func speechRecognitionTaskFinishedReadingAudio(_ task: SFSpeechRecognitionTask) {
+        print("--> speechRecognitionTaskFinishedReadingAudio")
+    }
+    
+    func speechRecognitionTaskWasCancelled(_ task: SFSpeechRecognitionTask) {
+        print("--> speechRecognitionTaskWasCancelled")
+    }
+    
+    func speechRecognitionTask(_ task: SFSpeechRecognitionTask, didFinishSuccessfully successfully: Bool) {
+        #warning("it seems to be deactivated after 1 minute, so we have to restart when this gets called")
+        print("--> didFinishSuccessfully:", successfully)
+        self.start()
     }
     
 }

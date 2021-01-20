@@ -7,6 +7,11 @@
 
 import Cocoa
 
+#warning("Latest researches")
+// https://www.google.com/search?client=safari&rls=en&q=SFSpeechRecognizer+tips&ie=UTF-8&oe=UTF-8
+// https://littlebitesofcocoa.com/236-sfspeechrecognizer-basics
+// https://www.reddit.com/r/swift/comments/efcna5/need_help_with_configuring_sfspeechrecognizer_for/
+
 final class ViewController: NSViewController {
     
     @IBOutlet weak var latestTextField: NSTextField!
